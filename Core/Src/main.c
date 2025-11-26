@@ -81,7 +81,7 @@ void SystemClock_Config(void);
 #define FRAME_HEADER_1 0xFE
 #define FRAME_HEADER_2 0xFE
 #define FRAME_END      0xFA
-#define FRAME_MAX_LEN  128
+#define FRAME_MAX_LEN  256
 
 typedef enum {
     RX_STATE_WAIT_HEADER1 = 0,
@@ -90,6 +90,8 @@ typedef enum {
     RX_STATE_WAIT_ID,
     RX_STATE_WAIT_CMD,
     RX_STATE_WAIT_CONTENT,
+	RX_STATE_WAIT_CRC_HIGH,    // 新增：CRC 高字节
+    RX_STATE_WAIT_CRC_LOW,     // 新增：CRC 低字节
     RX_STATE_WAIT_END
 } RxState;
 
@@ -182,35 +184,50 @@ static inline void rx_state_machine(BridgePort *p)
         break;
 
     case RX_STATE_WAIT_CMD:
+    p->buf[p->idx++] = p->rxByte;
+
+    if (p->rx_len > 5) {     // 有内容
+        p->state = RX_STATE_WAIT_CONTENT;
+    } else {                 // 无内容（LEN = 5）
+        p->state = RX_STATE_WAIT_CRC_HIGH;
+    }
+    break;
+
+case RX_STATE_WAIT_CONTENT:
+    if (p->idx < FRAME_MAX_LEN) {
         p->buf[p->idx++] = p->rxByte;
-        if (p->rx_len > 3)
-            p->state = RX_STATE_WAIT_CONTENT;
-        else
-            p->state = RX_STATE_WAIT_END;
-        break;
 
-    case RX_STATE_WAIT_CONTENT:
-        if (p->idx < FRAME_MAX_LEN) {
-            p->buf[p->idx++] = p->rxByte;
-            uint16_t payload_already = (p->idx - 3);
-            if (payload_already >= (p->rx_len - 1))
-                p->state = RX_STATE_WAIT_END;
-        } else {
-            reset_port(p);
+        // 正确：内容长度 = LEN - 5
+        uint16_t payload_len = (uint16_t)p->rx_len - 5; 
+        // 已收到的内容字节数 = idx - 5
+        uint16_t received = (uint16_t)p->idx - 5;
+
+        // 如果 payload_len==0 的情况在进入到此分支前应已被避开（LEN==5）
+        if (received >= payload_len) {
+            p->state = RX_STATE_WAIT_CRC_HIGH;
         }
-        break;
-
-    case RX_STATE_WAIT_END:
-        if (p->rxByte == FRAME_END) {
-            p->buf[p->idx++] = p->rxByte;
-            p->frameReady = 1;
-        }
-        p->state = RX_STATE_WAIT_HEADER1;
-        break;
-
-    default:
+    } else {
         reset_port(p);
-        break;
+    }
+    break;
+
+case RX_STATE_WAIT_CRC_HIGH:
+    p->buf[p->idx++] = p->rxByte;
+    p->state = RX_STATE_WAIT_CRC_LOW;
+    break;
+
+case RX_STATE_WAIT_CRC_LOW:
+    p->buf[p->idx++] = p->rxByte;
+    p->state = RX_STATE_WAIT_END;
+    break;
+
+case RX_STATE_WAIT_END:
+    if (p->rxByte == FRAME_END) {
+        p->buf[p->idx++] = p->rxByte;
+        p->frameReady = 1;
+    }
+    p->state = RX_STATE_WAIT_HEADER1;
+    break;
     }
 
     // 更新 lastByte
